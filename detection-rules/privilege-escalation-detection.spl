@@ -1,0 +1,24 @@
+# Privilege Escalation Detection Rule
+# Detects unauthorized privilege changes and suspicious admin account activity
+
+index=main sourcetype=linux_secure OR sourcetype=WinEventLog:Security
+(EventCode=4728 OR EventCode=4732 OR EventCode=4756 OR command="sudo" OR command="su")
+| eval action_type=case(
+    EventCode=4728, "User Added to Global Security Group",
+    EventCode=4732, "User Added to Local Security Group",
+    EventCode=4756, "User Added to Universal Security Group",
+    command="sudo" OR command="su", "Privilege Escalation via sudo/su",
+    true(), "Unknown"
+  )
+| stats count AS occurrence, values(user) AS accounts, values(src_ip) AS source_ip, 
+  values(action_type) AS actions by _time, host
+| where occurrence >= 1
+| eval severity=case(
+    match(actions, "sudo|su"), "HIGH",
+    match(actions, "Security Group"), "MEDIUM",
+    true(), "LOW"
+  )
+| eval detection="Privilege Escalation"
+| table _time, host, accounts, source_ip, actions, occurrence, severity, detection
+| sort -severity
+

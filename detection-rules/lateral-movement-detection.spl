@@ -1,0 +1,28 @@
+# Lateral Movement Detection Rule
+# Detects suspicious remote logins, SMB connections, and unusual authentication patterns
+
+index=main sourcetype=linux_secure OR sourcetype=WinEventLog:Security
+(EventCode=4624 OR EventCode=4648 OR command="ssh" OR command="psexec")
+| eval logon_type=case(
+    EventCode=4624 AND Logon_Type=3, "Network Logon",
+    EventCode=4624 AND Logon_Type=10, "Remote Interactive Logon",
+    EventCode=4648, "Explicit Credential Logon",
+    command="ssh", "SSH Remote Login",
+    command="psexec", "PsExec Remote Execution",
+    true(), "Other"
+  )
+| stats count AS logon_count, dc(host) AS unique_hosts, 
+  values(host) AS accessed_hosts, values(logon_type) AS logon_types,
+  values(user) AS accounts by _time, src_ip
+| where unique_hosts >= 3 OR match(logon_types, "PsExec|Explicit")
+| eval severity=case(
+    match(logon_types, "PsExec"), "CRITICAL",
+    unique_hosts >= 5, "HIGH",
+    unique_hosts >= 3, "MEDIUM",
+    true(), "LOW"
+  )
+| eval detection="Lateral Movement"
+| table _time, src_ip, accounts, accessed_hosts, unique_hosts, logon_types, logon_count, severity, detection
+| sort -severity
+
+
