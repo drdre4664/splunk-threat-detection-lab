@@ -1,0 +1,127 @@
+# =====================================================================
+# PHISHING DETECTION RULES (SPL)
+# Email gateway log analysis for phishing campaign disruption
+# Data source: email gateway logs (sourcetype=email_gateway)
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+# RULE 1 — Email Authentication Failures (SPF / DKIM / DMARC)
+# Legitimate corporate mail passes SPF, DKIM, and DMARC.
+# Mail claiming to be from a brand but FAILING these is a strong
+# phishing/spoofing indicator.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway (spf=fail OR dkim=fail OR dmarc=fail)
+| eval auth_failures=mvcount(split(spf.":".dkim.":".dmarc,"fail"))-1
+| stats count AS emails, values(subject) AS subjects, values(recipient) AS targets
+        by sender, sender_domain, spf, dkim, dmarc
+| eval severity=case(
+    dmarc=="fail" AND spf=="fail" AND dkim=="fail", "CRITICAL",
+    dmarc=="fail", "HIGH",
+    true(), "MEDIUM")
+| sort - emails
+
+
+# ---------------------------------------------------------------------
+# RULE 2 — Lookalike / Cousin Domain Detection
+# Detects domains designed to impersonate wellsfargo.com:
+#   character swaps (wellsf4rgo, wellsfarg0), hyphenation
+#   (wells-fargo-secure), added words (wellsfargo-it.net)
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway
+| regex sender_domain="(?i)(well?s?[-_]?f[a4]rg[o0]|wellsfargo[-_])"
+| search NOT sender_domain="wellsfargo.com"
+| stats count AS emails, values(subject) AS subjects, dc(recipient) AS recipients_targeted
+        by sender_domain, display_name
+| eval detection="Lookalike Domain Impersonating Wells Fargo"
+| eval severity="HIGH"
+| sort - emails
+
+
+# ---------------------------------------------------------------------
+# RULE 3 — Display Name Spoofing
+# The display name claims to be Wells Fargo but the actual sending
+# domain is NOT wellsfargo.com. Classic brand impersonation.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway
+| search display_name="*Wells Fargo*" OR display_name="*Charlie Scharf*"
+| search NOT sender_domain="wellsfargo.com"
+| stats count AS emails, values(subject) AS subjects, values(recipient) AS targets
+        by display_name, sender, sender_domain
+| eval detection="Display Name Spoofing - brand impersonation"
+| eval severity="HIGH"
+| sort - emails
+
+
+# ---------------------------------------------------------------------
+# RULE 4 — Suspicious URLs (IP-address links & URL shorteners)
+# Links to raw IP addresses or shortener services hide the true
+# destination and are common in credential-harvesting phishing.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway
+| rex field=url "https?://(?<url_host>[^/]+)"
+| eval url_risk=case(
+    match(url_host, "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"), "IP Address URL",
+    match(url_host, "(?i)(bit\.ly|tinyurl|goo\.gl|t\.co|ow\.ly)"), "URL Shortener",
+    true(), "normal")
+| search url_risk!="normal"
+| stats count AS emails, values(url) AS urls, values(recipient) AS targets
+        by sender, sender_domain, url_risk
+| eval severity="HIGH"
+| sort - emails
+
+
+# ---------------------------------------------------------------------
+# RULE 5 — Credential-Harvesting / Urgency Language in Subject
+# Phishing relies on urgency and account-threat language to pressure
+# the victim into clicking before thinking.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway
+| eval subject_lower=lower(subject)
+| where match(subject_lower, "(urgent|verify|suspend|immediately|action required|expires today|account.*limited|reset now|password)")
+| stats count AS emails, values(sender_domain) AS domains, values(recipient) AS targets
+        by subject
+| eval detection="Urgency / credential-harvesting language"
+| eval severity="MEDIUM"
+| sort - emails
+
+
+# ---------------------------------------------------------------------
+# RULE 6 — Phishing Campaign Detection (volume / fan-out)
+# The SAME suspicious email (failing auth) hitting MULTIPLE recipients
+# in a short window indicates a coordinated campaign, not a one-off.
+# This is the highest-priority signal for disruption.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway (spf=fail OR dkim=fail OR dmarc=fail)
+| bin _time span=1h
+| stats dc(recipient) AS employees_targeted, count AS total_emails,
+        values(subject) AS subject by _time, sender_domain
+| where employees_targeted >= 2
+| eval severity=case(
+    employees_targeted >= 10, "CRITICAL",
+    employees_targeted >= 5,  "HIGH",
+    true(), "MEDIUM")
+| eval detection="Phishing CAMPAIGN - coordinated fan-out"
+| sort - employees_targeted
+
+
+# ---------------------------------------------------------------------
+# RULE 7 — Combined Phishing Risk Score
+# Aggregates multiple weak signals into a single risk score per sender.
+# This is the "new logic" approach: no single rule is perfect, so we
+# score across many indicators and alert on the total.
+# ---------------------------------------------------------------------
+index=email sourcetype=email_gateway
+| eval score=0
+| eval score=if(dmarc=="fail", score+30, score)
+| eval score=if(spf=="fail", score+20, score)
+| eval score=if(dkim=="fail", score+15, score)
+| eval score=if(match(lower(subject),"(urgent|verify|suspend|immediately|action required|expires)"), score+20, score)
+| eval score=if(match(url,"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"), score+25, score)
+| eval score=if(match(url,"(?i)(bit\.ly|tinyurl|goo\.gl)"), score+15, score)
+| eval score=if(NOT match(sender_domain,"wellsfargo\.com") AND match(display_name,"(?i)wells fargo"), score+30, score)
+| where score >= 40
+| stats max(score) AS risk_score, count AS emails, values(subject) AS subjects,
+        dc(recipient) AS targets by sender, sender_domain
+| eval verdict=case(risk_score>=70,"BLOCK & DISRUPT", risk_score>=50,"QUARANTINE", true(),"REVIEW")
+| sort - risk_score
