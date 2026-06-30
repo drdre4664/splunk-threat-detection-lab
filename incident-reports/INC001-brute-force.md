@@ -88,6 +88,20 @@ to internet without IP allowlisting or rate limiting.
 ---
 
 ## Lessons Learned
-- SSH password authentication should never be exposed to the internet
-- Lateral movement was possible due to shared credentials across systems
-- Detection-to-containment time can be reduced with automated SOAR playbook
+
+**Detection & Investigation**
+- SSH password authentication should never be exposed to the internet — key-based auth only
+- Splunk does not always auto-parse fields from raw syslog format; `rex` extraction is required to pull structured fields (user, src_ip, host) from unstructured log lines before stats commands can operate on them
+- The attacker IP changed from `192.168.1.105` to `10.0.1.105` mid-attack — the compromised webserver01 was used as a launchpad to pivot into the internal `10.0.x.x` subnet, which is why lateral movement appeared under a different IP
+- Internal IPs (192.168.x.x, 10.x.x.x) in an attack are more alarming than external IPs — they indicate the attacker is already inside the network perimeter, where traffic is generally trusted
+
+**Containment & Response**
+- Immediate containment = isolate the compromised machine by blocking its IP at the firewall or disabling its network interface — stops further lateral movement instantly
+- Lateral movement was possible due to a flat network with no segmentation — all servers could communicate freely with no firewall rules between zones
+- Proper network segmentation (DMZ → App zone → DB zone → Backup zone) would have contained the breach to webserver01 alone
+
+**Preventive Controls That Would Have Stopped This**
+- MFA on SSH — even with the correct password, a second factor would have blocked the attacker at login
+- fail2ban or equivalent — automatically blocks an IP after 3-5 failed attempts, preventing brute force from reaching 14 attempts
+- Privileged Access Management (PAM) — would have prevented unrestricted `sudo /bin/bash` and alerted on `/etc/shadow` access
+- Shared credentials across systems allowed one compromised account to access all 5 servers — each system should require separate credentials

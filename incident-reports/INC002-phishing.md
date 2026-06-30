@@ -98,7 +98,19 @@ set to deliver-and-flag rather than reject on DMARC failure.
 ---
 
 ## Lessons Learned
-- DMARC=fail messages should never be delivered to inboxes — gateway policy gap
-- Campaign fan-out detection (same sender → many recipients) is the highest-value
-  signal for distinguishing a one-off from an active campaign requiring disruption
-- A risk-scoring approach catches phishing that no single rule would flag alone
+
+**Detection Logic**
+- DMARC=fail messages should never be delivered to inboxes — gateway policy was set to deliver-and-flag instead of reject, which is a critical misconfiguration
+- Campaign fan-out detection (same suspicious sender → multiple recipients in a short window) is the highest-value signal for distinguishing a one-off email from an active campaign requiring immediate disruption
+- A risk-scoring approach catches phishing that no single rule would flag alone — individual signals like urgency language or a failed SPF check can appear in legitimate mail; it is the combination of signals that confirms phishing
+
+**On Risk Scoring Weights**
+- The scoring weights (DMARC=30, SPF=20, DKIM=15, urgency=20, IP URL=25, display name impersonation=30) are analyst-defined, not industry-mandated — but they are grounded in how dangerous each signal is in practice
+- DMARC receives the highest weight because a DMARC failure is the strongest single indicator that an email is forged — it cannot fail on a legitimately sent email
+- The verdict thresholds (70=BLOCK, 50=QUARANTINE, 40=REVIEW) require tuning based on observed false positive rates in production — this process is called threshold calibration and is a standard part of detection engineering
+- Real enterprise platforms (Proofpoint, Microsoft Defender for Office 365, Mimecast) use the same weighted scoring approach — no single rule, combined signals into tiered verdicts
+
+**Containment & Disruption**
+- Detection alone is not enough — the gateway DMARC policy must be set to reject so that authentication failures never reach the inbox in the first place
+- Once a campaign is identified via fan-out detection, all delivered copies must be pulled from inboxes immediately — employees who received the email before the block may still click the link
+- Defensive domain registration (registering common lookalike variants of your own domain) would have prevented the attacker from using wells-fargo-secure.com and wellsf4rgo.com
